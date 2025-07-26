@@ -1,19 +1,18 @@
-// electron-app/main.js
-
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
-const WebSocket = require('ws'); // ADDED for WebSocket client
+const WebSocket = require('ws'); // Explicitly import WebSocket for clarity
 
-let ffmpegProcess = null;
-let wsClient = null; // Changed from tcpClient to wsClient for WebSocket
+let ffmpegProcess = null; // Renamed for clarity, though it's 'rec' now
+let wsClient = null; // WebSocket client
 let audioBuffer = []; // Buffer to store audio data for replay
 
 // Function to start audio capture
 function startAudioCapture(mainWindow) {
   console.log('Starting audio capture...');
 
-  audioBuffer = []; // Clear previous audio buffer
+  // Clear previous audio buffer
+  audioBuffer = [];
 
   // Close any existing WebSocket connection before starting a new one
   if (wsClient) {
@@ -21,100 +20,92 @@ function startAudioCapture(mainWindow) {
     wsClient = null;
   }
 
-  // Ensure ffmpegProcess is stopped if it's still running
+  // Ensure audio capture process is stopped if it's still running
   if (ffmpegProcess) {
     ffmpegProcess.kill();
     ffmpegProcess = null;
   }
 
-  // --- Audio Recording Process Setup ---
-  // IMPORTANT: The 'arecord' command is for Linux systems.
-  // For macOS, you might need 'sox' or 'ffmpeg'.
-  // If 'arecord' works on your Mac (via Homebrew or similar), keep it.
-  // Otherwise, you'll need to install 'ffmpeg' (e.g., `brew install ffmpeg`)
-  // or 'sox' (e.g., `brew install sox`) and use the appropriate command.
-
-  // Example for macOS with ffmpeg (ensure ffmpeg is in your PATH):
-  // ffmpegProcess = spawn('ffmpeg', [
-  //   '-f', 'avfoundation', // Or 'coreaudio' depending on macOS version
-  //   '-i', ':0', // Input device, might need to change if you have multiple mics
-  //   '-f', 's16le',
-  //   '-acodec', 'pcm_s16le',
-  //   '-ar', '16000',
-  //   '-ac', '1',
-  //   '-threads', '1',
-  //   'pipe:1'
-  // ]);
-
-  // Example for macOS with sox (ensure sox is installed):
-  // ffmpegProcess = spawn('sox', [
-  //   '-d', // Default audio device
-  //   '-r', '16000', // Sample rate
-  //   '-c', '1',    // Channels (mono)
-  //   '-b', '16',   // Bit depth
-  //   '-t', 'raw',  // Raw PCM
-  //   '-'           // Output to stdout
-  // ]);
-
-  // Using 'arecord' as per your original file, assuming it works for you:
-  ffmpegProcess = spawn('arecord', [
-    '-f', 'S16_LE', // Signed 16-bit Little Endian
-    '-r', '16000',  // 16kHz sample rate
-    '-c', '1',      // 1 channel (mono)
-    '-t', 'raw',    // Raw audio format
-    '-'             // Output to stdout
+  // Use 'rec' from SoX for audio capture on macOS
+  // Ensure SoX is installed via Homebrew: brew install sox
+  ffmpegProcess = spawn('rec', [
+    // Output format parameters:
+    '-r', '16000',      // Set output sample rate to 16kHz
+    '-c', '1',          // Channels: 1 (mono)
+    '-e', 'signed-integer', // Encoding: signed integer (SoX specific)
+    '-b', '16',         // Bit depth: 16-bit
+    '-t', 'raw',        // Output type: raw (raw PCM)
+    '-',                // Output to stdout (this is crucial for piping)
+    // Effect to apply *after* recording but *before* output
+    'rate', '16000'     // Explicitly resample to 16kHz (important if device doesn't support it natively)
+    // Removed problematic 'channels', 'enc', 'bits', 'endian' as separate effects/options
+    // These should be handled by the initial '-c', '-e', '-b', '-t' and the system's default endianness for raw.
   ]);
 
-
-  // --- WebSocket connection to FastAPI backend on port 8000 ---
-  wsClient = new WebSocket('ws://localhost:8000/ws'); // Connect to your FastAPI WebSocket endpoint
+  // Establish WebSocket connection
+  wsClient = new WebSocket('ws://localhost:8000/ws'); // Connect to your backend WebSocket
 
   wsClient.onopen = () => {
-    console.log('WebSocket client connected to FastAPI backend.');
-    // Pipe audio data from ffmpegProcess stdout to WebSocket
+    console.log('WebSocket client connected to backend.');
+    // Start streaming audio from rec to WebSocket once connection is open
     ffmpegProcess.stdout.on('data', (data) => {
-      // console.log(`Electron: Sending ${data.length} bytes via WebSocket`);
-      if (wsClient.readyState === WebSocket.OPEN) {
+      // console.log(`Electron: Received ${data.length} bytes from rec.`); // Too verbose, uncomment for deep debugging
+      if (wsClient && wsClient.readyState === WebSocket.OPEN) {
         wsClient.send(data);
         audioBuffer.push(data); // Store for replay
       }
     });
 
     ffmpegProcess.stderr.on('data', (data) => {
-      console.error(`arecord/ffmpeg stderr: ${data}`);
+      // This will capture 'rec WARN formats: can't set sample rate 16000; using 44100' etc.
+      console.error(`rec stderr: ${data}`);
+      mainWindow.webContents.send('backend-error', `Audio capture tool output: ${data}`);
     });
 
     ffmpegProcess.on('close', (code) => {
-      console.log(`Audio process exited with code ${code}`);
-      if (wsClient.readyState === WebSocket.OPEN) {
-        wsClient.close(); // Close WebSocket if audio process ends
+      console.log(`Audio capture process exited with code ${code}`);
+      if (code !== 0 && code !== null) { // null often means killed manually
+          mainWindow.webContents.send('backend-error', `Audio capture process exited unexpectedly with code ${code}`);
       }
+    });
+
+    ffmpegProcess.on('error', (err) => {
+      console.error('Failed to start audio capture process:', err);
+      mainWindow.webContents.send('backend-error', `Audio capture error: ${err.message}. Is 'rec' (SoX) installed and in your PATH?`);
     });
   };
 
   wsClient.onmessage = (event) => {
-    // This is where you'll receive real-time transcript, summary, and action items updates
-    console.log('Received message from WebSocket backend:', event.data);
-    try {
-      const message = JSON.parse(event.data);
-      if (message.type === 'transcript') {
+    const message = JSON.parse(event.data);
+    // console.log('Received message from backend:', message); // For debugging
+    switch (message.type) {
+      case 'transcript':
         mainWindow.webContents.send('transcript-update', message.data);
-      } else if (message.type === 'summary') {
+        break;
+      case 'summary':
         mainWindow.webContents.send('summary-update', message.data);
-      } else if (message.type === 'action_items') {
+        break;
+      case 'action_items':
         mainWindow.webContents.send('action-items-update', message.data);
-      }
-    } catch (e) {
-      console.error('Failed to parse WebSocket message:', e);
+        break;
+      case 'error':
+        mainWindow.webContents.send('backend-error', `Backend error: ${message.data}`);
+        break;
+      default:
+        console.warn('Unknown message type from backend:', message.type);
+    }
+  };
+
+  wsClient.onclose = (event) => {
+    console.log('WebSocket disconnected from backend:', event.code, event.reason);
+    if (!event.wasClean) {
+        mainWindow.webContents.send('backend-error', `WebSocket connection closed unexpectedly: ${event.code} ${event.reason || ''}`);
     }
   };
 
   wsClient.onerror = (error) => {
     console.error('WebSocket error:', error);
-  };
-
-  wsClient.onclose = () => {
-    console.log('WebSocket client disconnected from backend.');
+    mainWindow.webContents.send('backend-error', `WebSocket error: ${error.message || error}`);
   };
 }
 
@@ -125,8 +116,8 @@ function stopAudioCapture() {
     ffmpegProcess.kill();
     ffmpegProcess = null;
   }
-  if (wsClient) { // Now referring to wsClient
-    wsClient.close(); // Use close() for WebSockets
+  if (wsClient) {
+    wsClient.close();
     wsClient = null;
   }
 }
@@ -140,8 +131,10 @@ ipcMain.on('replay-audio', (event) => {
     event.sender.send('replay-audio-data', fullAudio);
   } else {
     console.warn('No audio data to replay.');
+    event.sender.send('replay-audio-data', null); // Send null to indicate no data
   }
 });
+
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -149,15 +142,15 @@ function createWindow() {
     height: 600,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: false, // nodeIntegration should be false when using preload
-      contextIsolation: true, // contextIsolation should be true when using preload
+      nodeIntegration: false,
+      contextIsolation: true,
     },
   });
 
   mainWindow.loadFile('index.html');
 
   // Open the DevTools.
-  // mainWindow.webContents.openDevTools(); // Uncomment this line to open DevTools for debugging Electron app
+  // mainWindow.webContents.openDevTools();
 
   ipcMain.on('start-audio-capture', () => startAudioCapture(mainWindow));
   ipcMain.on('stop-audio-capture', stopAudioCapture);

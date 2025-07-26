@@ -2,14 +2,16 @@
 
 import os
 import google.generativeai as genai
-import assemblyai as aai
 import asyncio
 import json
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from models import Transcript, AnalysisResult, ActionItem
 from datetime import datetime
 import functools
-from dotenv import load_dotenv # Import load_dotenv
+from dotenv import load_dotenv
+
+# Import Deepgram SDK
+from deepgram import DeepgramClient, LiveTranscriptionEvents, DeepgramClientOptions
 
 app = FastAPI()
 
@@ -18,18 +20,16 @@ try:
     load_dotenv() # Load environment variables from .env file
 
     gemini_api_key = os.getenv("GEMINI_API_KEY")
-    assemblyai_api_key = os.getenv("ASSEMBLYAI_API_KEY")
+    deepgram_api_key = os.getenv("DEEPGRAM_API_KEY") # Get Deepgram API key
 
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY not found. Please set it in your .env file or environment variables.")
-    if not assemblyai_api_key:
-        raise ValueError("ASSEMBLYAI_API_KEY not found. Please set it in your .env file or environment variables.")
+    if not deepgram_api_key:
+        raise ValueError("DEEPGRAM_API_KEY not found. Please set it in your .env file or environment variables.")
 
     genai.configure(api_key=gemini_api_key)
-    aai.api_key = assemblyai_api_key
 
 except Exception as e:
-    # Minimal error reporting here after attempting to load
     raise RuntimeError(f"Failed to configure API keys: {e}. Ensure they are set in your .env file or shell environment.")
 
 model = genai.GenerativeModel('gemini-2.0-flash')
@@ -99,21 +99,29 @@ async def websocket_endpoint(websocket: WebSocket):
 
     current_loop = asyncio.get_running_loop()
 
-    async def on_data_handler(data: bytes):
-        pass
+    # Define Deepgram event handlers (all are now async def)
+    async def on_message_handler(result, **kwargs):
+        if result.type == LiveTranscriptionEvents.SpeakerStarted:
+            pass
+        elif result.type == LiveTranscriptionEvents.SpeakerEnded:
+            pass
+        elif result.type == LiveTranscriptionEvents.Transcript:
+            if result.is_final:
+                for alternative in result.alternatives:
+                    if alternative.transcript:
+                        full_transcript_buffer.append(alternative.transcript)
+                        await websocket.send_json({"type": "transcript", "data": alternative.transcript})
+                        print(f"Received final transcript chunk: {alternative.transcript}")
+                        
+            else: # Partial transcript
+                for alternative in result.alternatives:
+                    if alternative.transcript:
+                        await websocket.send_json({"type": "transcript", "data": alternative.transcript})
+        # Other event types like metadata, error can be handled if needed
 
-    async def on_partial_handler(transcript: aai.RealtimeTranscript):
-        if transcript.text:
-            await websocket.send_json({"type": "transcript", "data": transcript.text})
-
-    async def on_final_handler(transcript: aai.RealtimeTranscript):
-        if transcript.text:
-            full_transcript_buffer.append(transcript.text)
-            await websocket.send_json({"type": "transcript", "data": transcript.text})
-            print(f"Received final transcript chunk: {transcript.text}")
-
-    def on_error_handler(error: aai.RealtimeError):
-        print(f"AssemblyAI Realtime Error: {error}")
+    async def on_error_handler(error, **kwargs): # <--- CHANGED HERE: async def
+        print(f"Deepgram Realtime Error: {error}")
+        # This part already schedules a coroutine, so it's fine
         async def send_error_to_websocket():
             try:
                 await websocket.send_json({"type": "error", "data": str(error)})
@@ -124,29 +132,44 @@ async def websocket_endpoint(websocket: WebSocket):
             lambda: asyncio.create_task(send_error_to_websocket())
         )
 
-    def on_close_handler():
-        print("AssemblyAI Realtime Transcriber connection closed.")
+    async def on_close_handler(*args, **kwargs): # <--- CHANGED HERE: async def
+        print("Deepgram Realtime Transcriber connection closed.")
 
-    transcriber = None
+    async def on_open_handler(*args, **kwargs): # <--- CHANGED HERE: async def
+        print("Deepgram Realtime Transcriber connected to Deepgram.")
+
+    # Initialize dg_connection to None before the try block
+    dg_connection = None 
+
     try:
-        if aai.api_key:
-            transcriber = aai.RealtimeTranscriber(
-                sample_rate=16000,
-                on_data=on_data_handler,
-                on_error=on_error_handler,
-                # REMOVED: model='universal-streaming' - This is the change from before
-            )
-            transcriber.on_partial_transcript = on_partial_handler
-            transcriber.on_final_transcript = on_final_handler
-            transcriber.on_close = on_close_handler
+        if deepgram_api_key:
+            deepgram_client = DeepgramClient(deepgram_api_key)
 
-            transcriber.connect()
-            print("AssemblyAI RealtimeTranscriber connected to AAI.")
+            dg_connection = deepgram_client.listen.asynclive.v("1")
+
+            # Register event handlers
+            dg_connection.on(LiveTranscriptionEvents.Transcript, on_message_handler)
+            dg_connection.on(LiveTranscriptionEvents.Open, on_open_handler)
+            dg_connection.on(LiveTranscriptionEvents.Close, on_close_handler)
+            dg_connection.on(LiveTranscriptionEvents.Error, on_error_handler)
+            
+            # Begin the connection
+            await dg_connection.start(
+                {
+                    "model": "nova-2",
+                    "punctuate": True,
+                    "interim_results": True,
+                    "smart_format": True,
+                    "language": "en-US",
+                    # "diarize": True # Uncomment if you want speaker diarization (can affect cost/latency)
+                }
+            )
+            print("Deepgram connection started.")
 
             while True:
                 try:
                     audio_chunk = await websocket.receive_bytes()
-                    transcriber.stream(audio_chunk)
+                    await dg_connection.send(audio_chunk)
 
                 except WebSocketDisconnect:
                     print("WebSocket disconnected (client initiated).")
@@ -161,8 +184,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     break
 
         else:
-            await websocket.send_json({"type": "error", "data": "AssemblyAI API key not configured. Cannot transcribe."})
-            print("AssemblyAI API key not configured for real-time transcription.")
+            await websocket.send_json({"type": "error", "data": "Deepgram API key not configured. Cannot transcribe."})
+            print("Deepgram API key not configured for real-time transcription.")
 
     except WebSocketDisconnect:
         print("WebSocket client disconnected gracefully.")
@@ -170,9 +193,9 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"An unexpected error occurred in WebSocket endpoint: {e}")
         await websocket.send_json({"type": "error", "data": f"Server error: {e}"})
     finally:
-        if transcriber:
-            transcriber.close()
-            print("AssemblyAI RealtimeTranscriber closed in finally block.")
+        if dg_connection:
+            await dg_connection.finish()
+            print("Deepgram connection finished in finally block.")
         
         if full_transcript_buffer:
             final_transcript_text = " ".join(full_transcript_buffer)
