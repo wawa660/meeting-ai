@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-wheel-metadata/
+.installed.cfg
+*.egg-info/
+pip-selfcheck.json
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# Electron
+.electron/
+dist/
+release/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
