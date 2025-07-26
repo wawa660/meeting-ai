@@ -1,143 +1,150 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('path');
+const { app, BrowserWindow, ipcMain } = require('electron'); // Import ipcMain
 const { spawn } = require('child_process');
-const net = require('net');
+const path = require('path');
+const { WebSocket } = require('ws');
 
-let ffmpegProcess = null;
-let tcpClient = null;
-let audioBuffer = []; // Buffer to store audio data for replay
-
-// Function to start audio capture
-function startAudioCapture(mainWindow) {
-  console.log('Starting audio capture...');
-
-  // Clear previous audio buffer
-  audioBuffer = [];
-
-  // Close any existing TCP connection before starting a new one
-  if (tcpClient) {
-    tcpClient.destroy();
-    tcpClient = null;
-  }
-
-  // Ensure ffmpegProcess is stopped if it's still running
-  if (ffmpegProcess) {
-    ffmpegProcess.kill();
-    ffmpegProcess = null;
-  }
-
-  // For Linux, you might need to find the correct audio source.
-  // This example uses 'arecord' for simplicity, which captures from the default microphone.
-  // For system audio, you'd typically need to configure PulseAudio or ALSA loopback devices.
-  ffmpegProcess = spawn('arecord', [
-    '-f', 'S16_LE',
-    '-r', '16000',
-    '-c', '1',
-    '-t', 'raw',
-    '-' // Output to stdout
-  ]);
-
-  // Connect to raw TCP server
-  tcpClient = net.connect({ port: 8001, host: 'localhost' }, () => {
-    console.log('TCP client connected to backend.');
-    ffmpegProcess.stdout.on('data', (data) => {
-      console.log(`Electron: Received ${data.length} bytes from arecord stdout.`);
-      audioBuffer.push(data); // Store data in buffer
-      if (tcpClient) {
-        tcpClient.write(data);
-        console.log(`Electron: Sent ${data.length} bytes to TCP server.`);
-      }
-    });
-
-    ffmpegProcess.stderr.on('data', (data) => {
-      console.error(`Electron: ffmpeg stderr: ${data}`);
-    });
-
-    ffmpegProcess.on('close', (code) => {
-      console.log(`Electron: ffmpeg process exited with code ${code}`);
-      // Clean up TCP client if ffmpeg closes unexpectedly
-      if (tcpClient) {
-        tcpClient.destroy();
-        tcpClient = null;
-      }
-    });
-  });
-
-  tcpClient.on('data', (data) => {
-    console.log(`Electron: Received data from TCP server: ${data.toString()}`);
-    // In a real scenario, this would be parsed as JSON for transcripts/summaries
-  });
-
-  tcpClient.on('end', () => {
-    console.log('TCP client disconnected from backend.');
-    tcpClient = null;
-  });
-
-  tcpClient.on('error', (err) => {
-    console.error('TCP client error:', err);
-    tcpClient = null;
-  });
-}
-
-// Function to stop audio capture
-function stopAudioCapture() {
-  console.log('Stopping audio capture...');
-  if (ffmpegProcess) {
-    ffmpegProcess.kill();
-    ffmpegProcess = null;
-  }
-  if (tcpClient) {
-    tcpClient.destroy();
-    tcpClient = null;
-  }
-}
-
-
-
-// IPC handler for replaying audio
-ipcMain.on('replay-audio', (event) => {
-  console.log('Replaying audio...');
-  if (audioBuffer.length > 0) {
-    // Concatenate all buffered audio chunks into a single Buffer
-    const fullAudio = Buffer.concat(audioBuffer);
-    event.sender.send('replay-audio-data', fullAudio);
-  } else {
-    console.warn('No audio data to replay.');
-  }
-});
+let mainWindow;
+let ws;
+let recProcess;
 
 function createWindow() {
-  const mainWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: false, // nodeIntegration should be false when using preload
-      contextIsolation: true, // contextIsolation should be true when using preload
-    },
-  });
+    mainWindow = new BrowserWindow({
+        width: 800,
+        height: 600,
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            nodeIntegration: false,
+            contextIsolation: true,
+        },
+    });
 
-  mainWindow.loadFile('index.html');
+    mainWindow.loadFile('index.html');
 
-  // Open the DevTools.
-  // mainWindow.webContents.openDevTools();
+    // Initialize WebSocket connection (do not start audio here)
+    ws = new WebSocket('ws://127.0.0.1:8000/ws');
 
-  ipcMain.on('start-audio-capture', () => startAudioCapture(mainWindow));
-  ipcMain.on('stop-audio-capture', stopAudioCapture);
+    ws.onopen = () => {
+        console.log('WebSocket client connected to backend.');
+        // Don't start audio capture immediately here anymore.
+        // It will be started by the 'start-recording' IPC event.
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const message = JSON.parse(event.data);
+            if (message.type === 'transcript') {
+                mainWindow.webContents.send('transcript-update', message.data);
+            } else if (message.type === 'summary') {
+                console.log('Received Summary:', message.data); // Log for debugging
+                mainWindow.webContents.send('summary-update', message.data);
+            } else if (message.type === 'action_items') { // New type for action items
+                console.log('Received Action Items:', message.data); // Log for debugging
+                mainWindow.webContents.send('action-items-update', message.data);
+            }
+            else if (message.type === 'error') {
+                console.error('Backend Error:', message.data);
+                mainWindow.webContents.send('error-message', message.data);
+            }
+        } catch (e) {
+            console.error('Failed to parse WebSocket message:', e, event.data);
+        }
+    };
+
+    ws.onclose = (event) => {
+        console.log('WebSocket disconnected from backend:', event.code, event.reason);
+        if (recProcess) {
+            recProcess.kill();
+            console.log('Stopping audio capture...');
+        }
+        // Consider re-establishing connection or informing user
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        mainWindow.webContents.send('error-message', `WebSocket Error: ${error.message}`);
+    };
+
+    // IPC Main handlers for renderer process communication
+    ipcMain.on('start-recording', () => {
+        if (!recProcess || recProcess.killed) { // Only start if not already running
+            recProcess = startAudioCapture(ws);
+        } else {
+            console.log('Recording already active.');
+        }
+    });
+
+    ipcMain.on('stop-recording', () => {
+        if (recProcess && !recProcess.killed) {
+            recProcess.kill(); // Stop the audio process
+            console.log('Sending stop signal to backend...');
+            // Send a specific message to the backend to signal recording stopped
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'stop_recording' }));
+            }
+        } else {
+            console.log('No active recording to stop.');
+        }
+    });
 }
 
-app.whenReady().then(() => {
-  createWindow();
+function startAudioCapture(websocket) {
+    console.log('Starting audio capture...');
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
-});
+    const recProcess = spawn('rec', [
+        '-q',
+        '-b', '16',
+        '-e', 'signed-integer',
+        '-c', '1',
+        '-t', 'raw',
+        '--buffer', '2000',
+        '-',
+        'rate', '16000'
+    ]);
+
+    recProcess.stdout.on('data', (data) => {
+        if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+        }
+    });
+
+    recProcess.stderr.on('data', (data) => {
+        console.error(`rec stderr: ${data}`);
+    });
+
+    recProcess.on('close', (code) => {
+        console.log(`Audio capture process exited with code ${code}`);
+        recProcess = null; // Clear the process reference
+    });
+
+    recProcess.on('error', (err) => {
+        console.error(`Failed to start rec process: ${err.message}`);
+        mainWindow.webContents.send('error-message', `Audio capture failed: ${err.message}. Is SoX installed and in your PATH?`);
+    });
+
+    return recProcess;
+}
+
+app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+    if (process.platform !== 'darwin') {
+        app.quit();
+    }
+});
+
+app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+    }
+});
+
+app.on('before-quit', () => {
+    if (recProcess) {
+        recProcess.kill();
+        console.log('Killed audio capture process before quitting.');
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+        console.log('Closed WebSocket connection before quitting.');
+    }
 });
