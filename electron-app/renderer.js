@@ -10,15 +10,15 @@ document.addEventListener('DOMContentLoaded', () => {
     stopButton.disabled = true; // Initially disabled
     document.getElementById('content').appendChild(stopButton);
 
-    const replayButton = document.createElement('button');
-    replayButton.textContent = 'Replay Last Recording';
-    replayButton.id = 'replayButton';
-    replayButton.disabled = true; // Initially disabled
-    document.getElementById('content').appendChild(replayButton);
+    const playButton = document.createElement('button');
+    playButton.textContent = 'Play Recording';
+    playButton.id = 'playButton';
+    playButton.disabled = true; // Initially disabled
+    document.getElementById('content').appendChild(playButton);
 
     const transcriptDiv = document.createElement('div');
     transcriptDiv.id = 'transcript';
-    transcriptDiv.innerHTML = '<h2>Live Transcript:</h2><p></p>';
+    transcriptDiv.innerHTML = '<h2>Transcript:</h2><p></p>';
     document.getElementById('content').appendChild(transcriptDiv);
 
     const summaryDiv = document.createElement('div');
@@ -31,75 +31,86 @@ document.addEventListener('DOMContentLoaded', () => {
     actionItemsDiv.innerHTML = '<h2>Action Items:</h2><ul></ul>';
     document.getElementById('content').appendChild(actionItemsDiv);
 
-    startButton.addEventListener('click', () => {
+    let mediaRecorder;
+    let audioChunks = [];
+    let audioBlob = null;
+
+    startButton.addEventListener('click', async () => {
         console.log('Start button clicked');
-        window.electronAPI.startAudioCapture();
-        startButton.disabled = true;
-        stopButton.disabled = false;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            audioBlob = null;
+
+            mediaRecorder.ondataavailable = (event) => {
+                audioChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                window.electronAPI.sendAudioToMain(arrayBuffer);
+                playButton.disabled = false;
+            };
+
+            mediaRecorder.start();
+            startButton.disabled = true;
+            stopButton.disabled = false;
+            playButton.disabled = true;
+            // Clear previous results
+            transcriptDiv.querySelector('p').textContent = '';
+            summaryDiv.querySelector('p').textContent = '';
+            actionItemsDiv.querySelector('ul').innerHTML = '';
+        } catch (error) {
+            console.error('Error accessing microphone:', error);
+            alert('Error accessing microphone. Please ensure you have a microphone and have granted permission.');
+        }
     });
 
     stopButton.addEventListener('click', () => {
         console.log('Stop button clicked');
-        window.electronAPI.stopAudioCapture();
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+            // Stop all tracks in the stream to release microphone
+            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        }
         startButton.disabled = false;
         stopButton.disabled = true;
-        replayButton.disabled = false; // Enable replay after stopping
+        transcriptDiv.querySelector('p').textContent = 'Recording stopped. Sending for analysis...';
     });
 
-    replayButton.addEventListener('click', () => {
-        console.log('Replay button clicked');
-        window.electronAPI.replayAudio();
+    playButton.addEventListener('click', () => {
+        console.log('Play button clicked');
+        if (audioBlob) {
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            audio.play();
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+            };
+        } else {
+            console.warn('No audio recorded to play.');
+        }
     });
 
-    window.electronAPI.onTranscript((transcript) => {
-        transcriptDiv.querySelector('p').textContent = transcript;
-    });
-
-    window.electronAPI.onSummary((summary) => {
-        summaryDiv.querySelector('p').textContent = summary;
-    });
-
-    window.electronAPI.onActionItems((actionItems) => {
+    window.electronAPI.onAnalysisResult((result) => {
+        console.log('Received analysis result:', result);
+        transcriptDiv.querySelector('p').textContent = result.transcript || 'No transcript available.';
+        summaryDiv.querySelector('p').textContent = result.summary;
         const ul = actionItemsDiv.querySelector('ul');
         ul.innerHTML = ''; // Clear previous items
-        actionItems.forEach(item => {
+        result.action_items.forEach(item => {
             const li = document.createElement('li');
             li.textContent = `Task: ${item.task}, Owner: ${item.owner}, Deadline: ${item.deadline}`;
             ul.appendChild(li);
         });
     });
 
-    window.electronAPI.onReplayAudioData(async (audioData) => {
-        console.log('Received audio data for replay.');
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        // Decode the audio data (assuming it's raw PCM S16_LE, 16kHz, mono)
-        // Need to convert Buffer to ArrayBuffer for decodeAudioData
-        const arrayBuffer = audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength);
-
-        // Create an AudioBuffer from the raw PCM data
-        // This requires manual decoding as decodeAudioData expects encoded formats (e.g., WAV, MP3)
-        // For raw PCM, we need to create an AudioBuffer and copy data.
-        const sampleRate = 16000;
-        const numberOfChannels = 1;
-        const length = audioData.length / 2; // 2 bytes per sample for S16_LE
-
-        const audioBufferNode = audioContext.createBuffer(numberOfChannels, length, sampleRate);
-        const nowBuffering = audioBufferNode.getChannelData(0);
-        const dataView = new DataView(arrayBuffer);
-
-        for (let i = 0; i < length; i++) {
-            // Read 16-bit signed integer and normalize to -1.0 to 1.0
-            nowBuffering[i] = dataView.getInt16(i * 2, true) / 32768.0;
-        }
-
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBufferNode;
-        source.connect(audioContext.destination);
-        source.start();
-
-        source.onended = () => {
-            console.log('Audio replay finished.');
-            audioContext.close();
-        };
+    window.electronAPI.onAnalysisError((errorMessage) => {
+        console.error('Analysis error:', errorMessage);
+        transcriptDiv.querySelector('p').textContent = `Error: ${errorMessage}`;
+        summaryDiv.querySelector('p').textContent = '';
+        actionItemsDiv.querySelector('ul').innerHTML = '';
     });
 });

@@ -1,9 +1,12 @@
 import os
 import google.generativeai as genai
 import assemblyai as aai
-import asyncio
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from models import Transcript, AnalysisResult, ActionItem
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI()
 
@@ -12,83 +15,39 @@ app = FastAPI()
 # For production, use a secure method like environment variables or a secret manager
 try:
     genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    aai.api_key = os.environ["ASSEMBLYAI_API_KEY"]
+    aai.settings.api_key = os.environ["ASSEMBLYAI_API_KEY"]
 except KeyError:
-    # This is a fallback for local development and not recommended for production
-    # Create a .env file in the backend directory with the line:
-    # GEMINI_API_KEY="your_api_key_here"
-    # ASSEMBLYAI_API_KEY="your_assemblyai_api_key_here"
-    from dotenv import load_dotenv
-    load_dotenv()
-    if "GEMINI_API_KEY" in os.environ and "ASSEMBLYAI_API_KEY" in os.environ:
-        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-        aai.api_key = os.environ["ASSEMBLYAI_API_KEY"]
-    else:
-        print("API keys not found in environment variables or .env file.")
-        # You might want to handle this more gracefully
-        # For now, we'll let it raise an exception if the key is not found
+    raise HTTPException(status_code=500, detail="API keys not found in environment variables or .env file. Please set GEMINI_API_KEY and ASSEMBLYAI_API_KEY.")
 
 # Initialize the Gemini model
 model = genai.GenerativeModel('gemini-2.0-flash')
 
-@app.websocket("/ws/audio")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        # Initialize AssemblyAI Realtime Transcriber
-        # You might want to configure sample_rate, word_boost, etc.
-        transcriber = aai.RealtimeTranscriber()
-        await transcriber.connect()
-
-        print("AssemblyAI Realtime Transcriber connected.")
-
-        async def send_audio_to_aai():
-            print("Starting send_audio_to_aai task.")
-            while True:
-                try:
-                    print("Backend: Waiting for audio data...")
-                    data = await websocket.receive_bytes()
-                    print(f"Backend: Received {len(data)} bytes from Electron. First 10 bytes: {data[:10].hex()}") # Log first 10 bytes
-                    await transcriber.stream(data)
-                except WebSocketDisconnect:
-                    print("Backend: Client disconnected from audio stream.")
-                    break
-                except Exception as e:
-                    print(f"Backend: Error receiving audio from client or sending to AAI: {e}")
-                    break
-            print("send_audio_to_aai task finished.")
-
-        async def receive_transcripts_from_aai():
-            print("Starting receive_transcripts_from_aai task.")
-            try:
-                async for transcript in transcriber.listen():
-                    if transcript.text:
-                        print(f"Backend: Received transcript from AAI: {transcript.text}")
-                        # Send transcript back to Electron app
-                        await websocket.send_json({"type": "transcript", "content": transcript.text})
-                        # TODO: Integrate LLM for summary and action items here
-                        # For now, just sending transcript
-            except Exception as e:
-                print(f"Backend: Error receiving transcripts from AAI: {e}")
-            print("receive_transcripts_from_aai task finished.")
-
-        # Run both tasks concurrently
-        await asyncio.gather(send_audio_to_aai(), receive_transcripts_from_aai())
-
-    except WebSocketDisconnect:
-        print("Backend: Client disconnected from WebSocket.")
-    except Exception as e:
-        print(f"Backend: WebSocket error: {e}")
-    finally:
-        if 'transcriber' in locals() and transcriber.is_connected:
-            await transcriber.close()
-            print("Backend: AssemblyAI Realtime Transcriber closed.")
-
 @app.post("/analyze", response_model=AnalysisResult)
-async def analyze_transcript(transcript: Transcript):
+async def analyze_audio(audio_file: UploadFile = File(...)):
     """
-    Analyzes a meeting transcript to generate a summary and extract action items.
+    Transcribes an audio file and then analyzes the transcript to generate a summary and extract action items.
     """
+    try:
+        # Save the uploaded audio file temporarily
+        file_location = f"/tmp/{audio_file.filename}"
+        with open(file_location, "wb") as file_object:
+            file_object.write(audio_file.file.read())
+
+        # Transcribe the audio file using AssemblyAI
+        transcriber = aai.Transcriber()
+        transcript_aai = transcriber.transcribe(file_location)
+
+        if transcript_aai.text:
+            transcript_text = transcript_aai.text
+        else:
+            raise HTTPException(status_code=500, detail="Failed to transcribe audio.")
+
+        # Clean up the temporary file
+        os.remove(file_location)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Audio transcription failed: {e}")
+
     prompt = f"""
     You are an expert AI assistant specializing in meeting analysis. Your task is to process a meeting transcript and extract critical information.
 
@@ -105,11 +64,11 @@ async def analyze_transcript(transcript: Transcript):
     Provide your final output in a single JSON object with two keys: "summary" and "action_items". The "action_items" key should contain an array of objects.
 
     Transcript:
-    {transcript.text}
+    {transcript_text}
     """
 
     try:
-        response = await model.generate_content_async(prompt)
+        response = model.generate_content(prompt)
         import json
         import re
 
@@ -122,6 +81,7 @@ async def analyze_transcript(transcript: Transcript):
             json_string = response.text
 
         result = json.loads(json_string)
+        result['transcript'] = transcript_text
         return AnalysisResult(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to analyze transcript: {e}")
