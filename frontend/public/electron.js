@@ -41,33 +41,8 @@ function createWindow() {
     })
   }
 
-const { spawn } = require("child_process");
-
-let backendProcess;
-
 app.whenReady().then(() => {
-  // Start the FastAPI backend
-  backendProcess = spawn("uvicorn", ["main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"], {
-    cwd: path.join(__dirname, "../../backend"), // Navigate to the backend directory
-    stdio: "inherit", // Pipe output to Electron's console
-  });
-
-  backendProcess.on("error", (err) => {
-    console.error("Failed to start backend process:", err);
-  });
-
-  backendProcess.on("close", (code) => {
-    console.log(`Backend process exited with code ${code}`);
-  });
-
   createWindow();
-});
-
-app.on("before-quit", () => {
-  if (backendProcess) {
-    console.log("Stopping backend process...");
-    backendProcess.kill();
-  }
 });
 
 app.on("window-all-closed", () => {
@@ -125,7 +100,7 @@ ipcMain.handle("send-audio-for-analysis", async (event, arrayBuffer) => {
       contentType: 'audio/webm',
     });
 
-    const response = await fetch('http://127.0.0.1:8000/analyze', {
+    const response = await fetch('https://meeting-ai-y7e0.onrender.com/analyze', {
       method: 'POST',
       body: form,
     });
@@ -153,7 +128,7 @@ ipcMain.handle("send-audio-for-analysis", async (event, arrayBuffer) => {
 ipcMain.handle("process-ai-summary", async (event, transcript) => {
   console.log("Main process received text transcript for AI summary.");
   try {
-    const response = await fetch("http://127.0.0.1:8000/analyze", {
+    const response = await fetch("https://meeting-ai-y7e0.onrender.com/analyze", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
