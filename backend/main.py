@@ -46,6 +46,8 @@ async def analyze_audio(audio_file: UploadFile = File(...)):
         os.remove(file_location)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc() # This will print the full traceback to the console
         raise HTTPException(status_code=500, detail=f"Audio transcription failed: {e}")
 
     prompt = f"""
