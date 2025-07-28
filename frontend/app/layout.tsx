@@ -20,9 +20,9 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>  
+    <html lang="en" className="no-scrollbar" suppressHydrationWarning>  
       <body className={inter.className}>
-        <div className="overflow-y-scroll scrollbar-hover">
+        <div className="h-full">
           <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
 
             <Titlebar />

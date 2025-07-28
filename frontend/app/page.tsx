@@ -108,6 +108,8 @@ export default function MeetingTranscriptApp() {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const [isNotionDialogOpen, setIsNotionDialogOpen] = useState(false)
+  const [isShareDialogOpen, setIsShareDialogOpen] = useState(false)
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false)
   const [notionConfig, setNotionConfig] = useState({
     apiKey: "",
     databaseId: "",
@@ -120,6 +122,7 @@ export default function MeetingTranscriptApp() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  
 
 
   // Handle theme mounting
@@ -230,13 +233,6 @@ export default function MeetingTranscriptApp() {
       setSummary(null)
       setTasks([])
 
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      intervalRef.current = setInterval(() => {
-        setMeetingDuration((prev) => prev + 1)
-      }, 1000)
-
       toast.info("Recording started!")
     } catch (error) {
       console.error("Error starting recording:", error)
@@ -249,9 +245,6 @@ export default function MeetingTranscriptApp() {
       mediaRecorderRef.current.stop()
       setIsRecording(false)
       setIsPaused(false) // Ensure not paused when stopping
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-      }
       toast.info("Recording stopped. Analyzing audio...")
     }
   }
@@ -412,30 +405,46 @@ export default function MeetingTranscriptApp() {
               <div className="text-sm text-muted-foreground">Duration: {formatTime(meetingDuration)}</div>
 
               {/* Theme Toggle */}
-              {mounted && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-                  className="relative overflow-hidden group transition-all duration-300 hover:scale-105"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-blue-500/10 to-purple-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                  {theme === "dark" ? (
-                    <Sun className="h-4 w-4 text-yellow-500 transition-transform duration-300 group-hover:rotate-180" />
-                  ) : (
-                    <Moon className="h-4 w-4 text-blue-600 transition-transform duration-300 group-hover:-rotate-12" />
-                  )}
-                </Button>
-              )}
-
-              <Button
-                variant="outline"
-                size="sm"
-                className="hover:scale-105 transition-transform duration-200 bg-transparent"
-              >
-                <Settings className="h-4 w-4 mr-2" />
-                Settings
-              </Button>
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="hover:scale-105 transition-transform duration-200 bg-transparent"
+                  >
+                    <Settings className="h-4 w-4 mr-2" />
+                    Settings
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Settings</DialogTitle>
+                    <DialogDescription>
+                      Manage your application settings here.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="py-4">
+                    {mounted && (
+                      <div className="flex items-center justify-between">
+                        <Label>Theme</Label>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                          className="relative overflow-hidden group transition-all duration-300 hover:scale-105"
+                        >
+                          <div className="absolute inset-0 bg-gradient-to-r from-blue-500/10 to-purple-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                          {theme === "dark" ? (
+                            <Sun className="h-4 w-4 text-yellow-500 transition-transform duration-300 group-hover:rotate-180" />
+                          ) : (
+                            <Moon className="h-4 w-4 text-blue-600 transition-transform duration-300 group-hover:-rotate-12" />
+                          )}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
             </div>
           </div>
         </div>
@@ -473,14 +482,64 @@ export default function MeetingTranscriptApp() {
                   </div>
 
                   <div className="flex items-center space-x-2">
-                    <Button variant="outline" size="sm">
-                      <Download className="h-4 w-4 mr-2" />
-                      Export
-                    </Button>
-                    <Button variant="outline" size="sm">
-                      <Share2 className="h-4 w-4 mr-2" />
-                      Share
-                    </Button>
+                    <Dialog open={isExportDialogOpen} onOpenChange={setIsExportDialogOpen}>
+                      <DialogTrigger asChild>
+                        <Button variant="outline" size="sm">
+                          <Download className="h-4 w-4 mr-2" />
+                          Export
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="sm:max-w-[425px]">
+                        <DialogHeader>
+                          <DialogTitle>Export Meeting Data</DialogTitle>
+                          <DialogDescription>
+                            Choose how you want to export your meeting summary and action items.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="grid gap-4 py-4">
+                          <Button
+                            variant="outline"
+                            className="w-full justify-start"
+                            onClick={() => {
+                              setIsExportDialogOpen(false);
+                              setIsNotionDialogOpen(true);
+                            }}
+                          >
+                            <BookOpen className="h-4 w-4 mr-2" />
+                            Export to Notion
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
+                    <Dialog open={isShareDialogOpen} onOpenChange={setIsShareDialogOpen}>
+                      <DialogTrigger asChild>
+                        <Button variant="outline" size="sm">
+                          <Share2 className="h-4 w-4 mr-2" />
+                          Share
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="sm:max-w-[425px]">
+                        <DialogHeader>
+                          <DialogTitle>Share Meeting Data</DialogTitle>
+                          <DialogDescription>
+                            Choose where you want to share your meeting summary and action items.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="grid gap-4 py-4">
+                          <Button
+                            variant="outline"
+                            className="w-full justify-start"
+                            onClick={() => {
+                              setIsShareDialogOpen(false);
+                              setIsNotionDialogOpen(true);
+                            }}
+                          >
+                            <BookOpen className="h-4 w-4 mr-2" />
+                            Share to Notion
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
                     <Dialog open={isNotionDialogOpen} onOpenChange={setIsNotionDialogOpen}>
                       <DialogTrigger asChild>
                         <Button
