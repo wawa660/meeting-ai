@@ -1,8 +1,8 @@
-# GenAI Agentic Bot: The "MinuteMaster"
+# GenAI Agentic Bot: The "Meeting AI"
 
 ## Overview
 
-The **MinuteMaster Agent** is an automated system designed to ingest raw meeting transcripts, analyze them using a Large Language Model (LLM), and produce structured, actionable outputs. The core function is to transform unstructured conversation into a concise summary and a clear list of tasks, complete with owners and deadlines, which can then be seamlessly shared across various collaboration platforms.
+The **Meeting AI Agent** is an automated system designed to ingest raw meeting transcripts, analyze them using a Large Language Model (LLM), and produce structured, actionable outputs. The core function is to transform unstructured conversation into a concise summary and a clear list of tasks, complete with owners and deadlines, which can then be seamlessly shared across various collaboration platforms.
 
 This agent operates by breaking down the problem into a sequence of specialized tasks: transcription, information extraction, summarization, and distribution.
 
