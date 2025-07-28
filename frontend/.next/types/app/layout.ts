@@ -1,4 +1,4 @@
-// File: /home/wawa/agentic-ai/frontend/app/layout.tsx
+// File: D:\Cursor\HACKATHON\Final1\New folder\meeting-ai\frontend\app\layout.tsx
 import * as entry from '../../../app/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 
